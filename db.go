@@ -527,25 +527,25 @@ func Shutdown() {
 
 // ======================
 
-type Operation struct {
+type operation struct {
 	name      string
 	startTime time.Time
 }
 
 var operationAllocPool = sync.Pool{
 	New: func() interface{} {
-		return &Operation{}
+		return &operation{}
 	},
 }
 
-func startOperation(operationName string) *Operation {
-	op := operationAllocPool.Get().(*Operation)
+func startOperation(operationName string) *operation {
+	op := operationAllocPool.Get().(*operation)
 	op.name = operationName
 	op.startTime = time.Now()
 	return op
 }
 
-func (op *Operation) finish(warnThreshold time.Duration) {
+func (op *operation) finish(warnThreshold time.Duration) {
 	takeTime := time.Now().Sub(op.startTime)
 	if warnThreshold > 0 && takeTime >= warnThreshold {
 		log.Printf("opmon: operation %s takes %s > %s", op.name, takeTime, warnThreshold)
