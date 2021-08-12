@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"github.com/jageros/db/mongo"
 	"github.com/jageros/evq"
+	"github.com/jageros/group"
+	"github.com/jageros/timer"
 	"github.com/xiaonanln/go-xnsyncutil/xnsyncutil"
 	"log"
 	"sync"
@@ -11,6 +14,7 @@ import (
 )
 
 var clients []IDbClient
+var initOnce sync.Once
 
 type iDbEngine interface {
 	Read(attrName string, attrID interface{}) (map[string]interface{}, error)
@@ -30,13 +34,53 @@ type iDbEngine interface {
 	IsEOF(err error) bool
 }
 
+// ============= DB Config =================
+
+type OpFn func(opt *Option)
+
 type IDbConfig interface {
-	GetType() string
+	//GetType() string
 	GetAddr() string
 	GetDB() string
 	GetUser() string
 	GetPassword() string
 }
+
+type Option struct {
+	Addr     string
+	DBName   string
+	User     string
+	Password string
+}
+
+func (op *Option) GetAddr() string     { return op.Addr }
+func (op *Option) GetDB() string       { return op.DBName }
+func (op *Option) GetUser() string     { return op.User }
+func (op *Option) GetPassword() string { return op.Password }
+
+func DefaultOption() *Option {
+	return &Option{
+		Addr:   "127.0.0.1:27017",
+		DBName: "Attribute",
+	}
+}
+
+func MongoDBConfig(addr, dbName string) OpFn {
+	return func(opt *Option) {
+		opt.Addr = addr
+		opt.DBName = dbName
+	}
+}
+
+func IDbConfigCreator(opfs ...OpFn) IDbConfig {
+	opt := DefaultOption()
+	for _, opf := range opfs {
+		opf(opt)
+	}
+	return opt
+}
+
+// =========== end ============
 
 type IDbClient interface {
 	getConfig() IDbConfig
@@ -63,10 +107,24 @@ type dbClient struct {
 	shutdownNotify       chan struct{}
 }
 
+func Initialize(g *group.Group) {
+	initOnce.Do(func() {
+		timer.Initialize(g)
+		g.Go(func(ctx context.Context) error {
+			<-ctx.Done()
+			for _, c := range clients {
+				c.shutdown()
+			}
+			clients = []IDbClient{}
+			return nil
+		})
+	})
+}
+
 func GetOrNewDbClient(cfg IDbConfig) IDbClient {
 	for _, cli := range clients {
 		cfg2 := cli.getConfig()
-		if cfg2.GetType() == cfg.GetType() && cfg2.GetAddr() == cfg.GetAddr() && cfg2.GetDB() == cfg.GetDB() {
+		if cfg2.GetAddr() == cfg.GetAddr() && cfg2.GetDB() == cfg.GetDB() {
 			return cli
 		}
 	}
@@ -96,13 +154,7 @@ func (c *dbClient) assureDBEngineReady() (err error) {
 	if c.dbEngine != nil {
 		return
 	}
-
-	if c.cfg.GetType() == "mongodb" {
-		c.dbEngine, err = mongo.OpenMongoDB(c.cfg.GetAddr(), c.cfg.GetDB(), c.cfg.GetUser(), c.cfg.GetPassword())
-	} else {
-		panic(fmt.Sprintf("unknown db type: %s", c.cfg.GetType()))
-	}
-
+	c.dbEngine, err = mongo.OpenMongoDB(c.cfg.GetAddr(), c.cfg.GetDB(), c.cfg.GetUser(), c.cfg.GetPassword())
 	return
 }
 
@@ -293,7 +345,7 @@ func (c *dbClient) dbRoutine() {
 	for {
 		err := c.assureDBEngineReady()
 		if err != nil {
-			log.Fatalf("db %s engine is not ready: %s", c.cfg, err)
+			log.Printf("db %s engine is not ready: %s", c.cfg, err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -317,7 +369,7 @@ func (c *dbClient) dbRoutine() {
 
 		err = req2.execute(c.dbEngine)
 		if err != nil {
-			log.Fatalf("db: %s %s failed: %s", c.cfg, req2.name(), err)
+			log.Printf("db: %s %s failed: %s", c.cfg, req2.name(), err)
 
 			if err != nil && c.dbEngine.IsEOF(err) {
 				c.dbEngine.Close()
@@ -516,13 +568,6 @@ func (r *insertRequest) execute(engine iDbEngine) error {
 		r.c <- err
 	}
 	return err
-}
-
-func Shutdown() {
-	for _, c := range clients {
-		c.shutdown()
-	}
-	clients = []IDbClient{}
 }
 
 // ======================
